@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.hardware.Camera;
 import android.preference.PreferenceManager;
+import android.util.Log;
 
 import com.squareup.otto.Bus;
 import com.squareup.otto.Subscribe;
@@ -63,19 +64,7 @@ public class EasyApplication extends Application {
 
     private void resetDefaultServer() {
         SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
-        String defaultIP = sharedPreferences.getString(Config.SERVER_IP, Config.DEFAULT_SERVER_IP);
-        if ("114.55.107.180".equals(defaultIP)
-                || "121.40.50.44".equals(defaultIP)
-                || "www.easydarwin.org".equals(defaultIP)){
-            sharedPreferences.edit().putString(Config.SERVER_IP, Config.DEFAULT_SERVER_IP).apply();
-        }
-
-        String defaultRtmpURL = sharedPreferences.getString(Config.SERVER_URL, Config.DEFAULT_SERVER_URL);
-        int result1 = defaultRtmpURL.indexOf("rtmp://www.easydss.com/live");
-        int result2 = defaultRtmpURL.indexOf("rtmp://121.40.50.44/live");
-        if(result1 != -1 || result2 != -1){
-            sharedPreferences.edit().putString(Config.SERVER_URL, Config.DEFAULT_SERVER_URL).apply();
-        }
+        sharedPreferences.edit().putString(Config.SERVER_IP, Config.DEFAULT_SERVER_IP).apply();
     }
 
     public static EasyApplication getEasyApplication() {

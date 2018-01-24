@@ -6,15 +6,17 @@
 */
 package org.easydarwin.easypusher;
 
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.ServiceConnection;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.SurfaceTexture;
-import android.media.Image;
 import android.media.projection.MediaProjectionManager;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
@@ -22,7 +24,6 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
 import android.preference.PreferenceManager;
-import android.provider.Settings;
 import android.support.v4.app.ActivityCompat;
 import android.support.v7.app.AlertDialog;
 import android.support.v7.app.AppCompatActivity;
@@ -45,16 +46,18 @@ import org.easydarwin.bus.StartRecord;
 import org.easydarwin.bus.StopRecord;
 import org.easydarwin.bus.StreamStat;
 import org.easydarwin.bus.SupportResolution;
+import org.easydarwin.config.Config;
 import org.easydarwin.easyrtmp.push.EasyRTMP;
 import org.easydarwin.push.InitCallback;
 import org.easydarwin.push.MediaStream;
 import org.easydarwin.update.UpdateMgr;
+import org.easydarwin.util.UartUtil;
 import org.easydarwin.util.Util;
+import org.easydarwin.util.uart.ComAssistant;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.jar.Manifest;
 
 import static org.easydarwin.easypusher.EasyApplication.BUS;
 import static org.easydarwin.update.UpdateMgr.MY_PERMISSIONS_REQUEST_WRITE_EXTERNAL_STORAGE;
@@ -64,13 +67,14 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
     static final String TAG = "EasyPusher";
     public static final int REQUEST_MEDIA_PROJECTION = 1002;
     public static final int REQUEST_CAMERA_PERMISSION = 1003;
+    public static ComAssistant uartComAssistant = null;
+    public static final String ACTION_NAME = "uartAction";
 
     //默认分辨率
-    int width = 640, height = 480;
+    int width = 1920, height = 1080;
     Button btnSwitch;
     Button btnSetting;
     TextView txtStreamAddress;
-    ImageButton btnSwitchCemera;
     Spinner spnResolution;
     List<String> listResolution = new ArrayList<String>();
     MediaStream mMediaStream;
@@ -99,12 +103,50 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
     };
     private boolean mNeedGrantedPermission;
 
+    private BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver(){
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if(ACTION_NAME.equals(intent.getAction())){
+                //收到上位机发送的命令
+                String command = intent.getExtras().getString("command");
+                String url = intent.getExtras().getString("url");
+                if("start".equals(command)){
+                    sendCMD("start", url);
+                }
+                if("stop".equals(command)){
+                    sendCMD("stop", null);
+                }
+            }
+        }
+
+        private void sendCMD(String cmd, String url) {
+            Message msg = Message.obtain();
+            msg.what = PUSH_COMMAND;
+            Bundle bundle = new Bundle();
+            bundle.putString(CMD, cmd);
+            bundle.putString("url",url);
+            msg.setData(bundle);
+            handler.sendMessage(msg);
+        }
+
+    };
+
+    public void registerBoradcastReceiver(){
+        IntentFilter myIntentFilter = new IntentFilter();
+        myIntentFilter.addAction(ACTION_NAME);
+        //注册广播
+        registerReceiver(mBroadcastReceiver, myIntentFilter);
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         BUS.register(this);
+
+        registerBoradcastReceiver();
+
         if (ActivityCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
                 ActivityCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, new String[]{android.Manifest.permission.CAMERA, android.Manifest.permission.RECORD_AUDIO}, REQUEST_CAMERA_PERMISSION);
@@ -125,8 +167,6 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
         btnSwitch.setOnClickListener(this);
         btnSetting = (Button) findViewById(R.id.btn_setting);
         btnSetting.setOnClickListener(this);
-        btnSwitchCemera = (ImageButton) findViewById(R.id.btn_switchCamera);
-        btnSwitchCemera.setOnClickListener(this);
         txtStreamAddress = (TextView) findViewById(R.id.txt_stream_address);
         textRecordTick = (TextView) findViewById(R.id.tv_start_record);
         final TextureView surfaceView = (TextureView) findViewById(R.id.sv_surfaceview);
@@ -146,12 +186,6 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
             TextView viewById = (TextView) findViewById(R.id.push_screen_url);
             viewById.setText(EasyApplication.getEasyApplication().getUrl() + "_s");
         }
-
-        String url = "http://www.easydarwin.org/versions/easyrtmp/version.txt";
-
-        update = new UpdateMgr(this);
-        update.checkUpdate(url);
-
 
         // create background service for background use.
         Intent intent = new Intent(this, BackgroundCameraService.class);
@@ -193,7 +227,15 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
             textRecordTick.setVisibility(View.GONE);
             textRecordTick.removeCallbacks(mRecordTickRunnable);
         }
-
+        try{
+            new Thread(){
+                public void run() {
+                    UartUtil.openComPort(StreamActivity.this);
+                }
+            }.start();
+        }catch (Exception e){
+            Log.e("EasyApplication", e.toString());
+        }
     }
 
     @Subscribe
@@ -298,10 +340,12 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
 
     private static final String STATE = "state";
     private static final int MSG_STATE = 1;
+    private static final String CMD = "command";
+    private static final int PUSH_COMMAND = 2;
 
-    private void sendMessage(String message) {
+    private void sendMessage(String message, int what) {
         Message msg = Message.obtain();
-        msg.what = MSG_STATE;
+        msg.what = what;
         Bundle bundle = new Bundle();
         bundle.putString(STATE, message);
         msg.setData(bundle);
@@ -316,6 +360,25 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
                     String state = msg.getData().getString("state");
                     txtStatus.setText(state);
                     break;
+                case PUSH_COMMAND:
+                    String cmd = msg.getData().getString(CMD);
+                    if("start".equals(cmd)){
+                        String url = msg.getData().getString("url");
+                        if(url != null && !"".equals(url)){
+                            SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(StreamActivity.this);
+                            String defValue = url;
+                            sharedPreferences.edit().putString(Config.SERVER_URL, defValue).apply();
+                            Config.DEFAULT_SERVER_URL = url;
+                        }
+                        if(mMediaStream.isStreaming()){
+                            mMediaStream.stopStream();
+                        }
+                        switchPush();
+                    }
+                    if("stop".equals(cmd)){
+                        mMediaStream.stopStream();
+                    }
+                    break;
             }
         }
     };
@@ -325,7 +388,7 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spnResolution.setAdapter(adapter);
         int position = listResolution.indexOf(String.format("%dx%d", width, height));
-        spnResolution.setSelection(position, false);
+        spnResolution.setSelection(position, true);
         spnResolution.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
@@ -364,7 +427,7 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
         mMediaStream.startPreview();
 
         if (mMediaStream.isStreaming()) {
-            sendMessage("推流中");
+            sendMessage("推流中", MSG_STATE);
             btnSwitch.setText("停止");
             txtStreamAddress.setText(EasyApplication.getEasyApplication().getUrl());
         }
@@ -398,55 +461,7 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
             }
             break;
             case R.id.btn_switch:
-                if (!mMediaStream.isStreaming()) {
-                    String url = EasyApplication.getEasyApplication().getUrl();
-                    mMediaStream.startStream(url, new InitCallback() {
-                        @Override
-                        public void onCallback(int code) {
-                            switch (code) {
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_INVALID_KEY:
-                                    sendMessage("无效Key");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_SUCCESS:
-                                    sendMessage("激活成功");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_CONNECTING:
-                                    sendMessage("连接中");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_CONNECTED:
-                                    sendMessage("连接成功");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_CONNECT_FAILED:
-                                    sendMessage("连接失败");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_CONNECT_ABORT:
-                                    sendMessage("连接异常中断");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_PUSHING:
-                                    sendMessage("推流中");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_DISCONNECTED:
-                                    sendMessage("断开连接");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_PLATFORM_ERR:
-                                    sendMessage("平台不匹配");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_COMPANY_ID_LEN_ERR:
-                                    sendMessage("断授权使用商不匹配");
-                                    break;
-                                case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_PROCESS_NAME_LEN_ERR:
-                                    sendMessage("进程名称长度不匹配");
-                                    break;
-                            }
-                        }
-                    });
-                    btnSwitch.setText("停止");
-                    txtStreamAddress.setText(url);
-                } else {
-                    mMediaStream.stopStream();
-                    btnSwitch.setText("开始");
-                    sendMessage("断开连接");
-                }
+                switchPush();
                 break;
             case R.id.btn_setting:
                 startActivity(new Intent(this, SettingActivity.class));
@@ -457,10 +472,62 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
                 } catch (Exception e) {
                 }
                 break;
-            case R.id.btn_switchCamera: {
-                mMediaStream.switchCamera();
+             }
+    }
+
+    public void switchPush() {
+        if (!mMediaStream.isStreaming()) {
+            if (mMediaStream != null) {
+                mMediaStream.updateResolution(width, height);
             }
-            break;
+            String url = EasyApplication.getEasyApplication().getUrl();
+            Log.i("EasyRTMP","url:" + url);
+            mMediaStream.startStream(url, new InitCallback() {
+                @Override
+                public void onCallback(int code) {
+                    switch (code) {
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_INVALID_KEY:
+                            sendMessage("无效Key", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_SUCCESS:
+                            sendMessage("激活成功", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_CONNECTING:
+                            sendMessage("连接中", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_CONNECTED:
+                            sendMessage("连接成功", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_CONNECT_FAILED:
+                            sendMessage("连接失败", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_CONNECT_ABORT:
+                            sendMessage("连接异常中断", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_PUSHING:
+                            sendMessage("推流中", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_RTMP_STATE_DISCONNECTED:
+                            sendMessage("断开连接", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_PLATFORM_ERR:
+                            sendMessage("平台不匹配", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_COMPANY_ID_LEN_ERR:
+                            sendMessage("断授权使用商不匹配", MSG_STATE);
+                            break;
+                        case EasyRTMP.OnInitPusherCallback.CODE.EASY_ACTIVATE_PROCESS_NAME_LEN_ERR:
+                            sendMessage("进程名称长度不匹配", MSG_STATE);
+                            break;
+                    }
+                }
+            });
+            btnSwitch.setText("停止");
+            txtStreamAddress.setText(url);
+        } else {
+            mMediaStream.stopStream();
+            btnSwitch.setText("开始");
+            sendMessage("断开连接", MSG_STATE);
         }
     }
 
@@ -543,11 +610,6 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
             super.onBackPressed();
         }
     }
-
-    public void onAbut(View view) {
-        startActivity(new Intent(this, AboutActivity.class));
-    }
-
     @Override
     public void onSurfaceTextureAvailable(final SurfaceTexture surface, int width, int height) {
         if (mService != null) {
@@ -570,7 +632,7 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
                 String url = EasyApplication.getEasyApplication().getUrl();
                 btnSwitch.setText("停止");
                 txtStreamAddress.setText(url);
-                sendMessage("推流中");
+                sendMessage("推流中", MSG_STATE);
             }
         } else {
             ms = new MediaStream(getApplicationContext(), surface, PreferenceManager.getDefaultSharedPreferences(this)
@@ -579,6 +641,10 @@ public class StreamActivity extends AppCompatActivity implements View.OnClickLis
             mMediaStream = ms;
             startCamera();
             mService.setMediaStream(ms);
+        }
+
+        if (mMediaStream != null) {
+            mMediaStream.updateResolution(width, height);
         }
     }
 
